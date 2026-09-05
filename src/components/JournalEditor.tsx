@@ -16,7 +16,9 @@ import {
   FileText,
   ListTodo,
   AlertCircle,
-  X
+  X,
+  Compass,
+  HeartHandshake
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import {
@@ -125,9 +127,16 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isAutoSummarizing, setIsAutoSummarizing] = useState(false);
+  const [dismissedReframe, setDismissedReframe] = useState(false);
+  const [isEvaluatingReframe, setIsEvaluatingReframe] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Reset dismissed reframe state when switching entries
+  useEffect(() => {
+    setDismissedReframe(false);
+  }, [currentEntry.id]);
 
   // Auto-scroll to bottom of conversation
   useEffect(() => {
@@ -137,7 +146,7 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
   // Persist entry changes to Firestore
   const saveToFirestore = async (
     entryToSave: JournalEntry,
-    options?: { preserveErrorMessage?: boolean }
+    options?: { preserveErrorMessage?: boolean; skipReframe?: boolean }
   ) => {
     setIsSavingFirestore(true);
     setSaveStatus('saving');
@@ -145,12 +154,65 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
       setErrorMessage(null);
     }
 
+    let resolvedEntry = { ...entryToSave };
+
+    // Directive #8: Cognitive Reframe Assistant (Conditional Trigger)
+    // On saving a journal entry, evaluate if the entry contains a STRONG signal of a cognitive distortion.
+    // If not yet triggered, run the classifier.
+    if (!resolvedEntry.reframe?.triggered && !options?.skipReframe) {
+      const userText = resolvedEntry.messages
+        .filter((m) => m.role === 'user')
+        .map((m) => m.content)
+        .join('\n\n') || inputText.trim() || resolvedEntry.title;
+
+      if (userText.trim().length > 0) {
+        try {
+          setIsEvaluatingReframe(true);
+          const reframeRes = await fetch('/api/gemini/reframe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: userText }),
+          });
+
+          if (reframeRes.ok) {
+            const reframeData = await reframeRes.json().catch(() => null);
+            if (reframeData && typeof reframeData.triggered === 'boolean') {
+              resolvedEntry = {
+                ...resolvedEntry,
+                reframe: {
+                  triggered: Boolean(reframeData.triggered),
+                  detectedDistortion: reframeData.detectedDistortion || null,
+                  acknowledgment: reframeData.acknowledgment || null,
+                  reframeQuestion: reframeData.reframeQuestion || null,
+                  createdAt: new Date().toISOString(),
+                },
+              };
+              onUpdateEntry(resolvedEntry);
+            }
+          }
+        } catch (reframeErr) {
+          console.warn('Cognitive reframe check deferred:', reframeErr);
+        } finally {
+          setIsEvaluatingReframe(false);
+        }
+      }
+    }
+
     try {
       // Direct isolation in /users/{userId}/entries/{entryId}
-      const entryRef = doc(db, 'users', user.uid, 'entries', entryToSave.id);
+      const entryRef = doc(db, 'users', user.uid, 'entries', resolvedEntry.id);
       const cleanData = sanitizeForFirestore({
-        ...entryToSave,
-        mood: entryToSave.mood || null,
+        ...resolvedEntry,
+        mood: resolvedEntry.mood || null,
+        reframe: resolvedEntry.reframe
+          ? {
+              triggered: Boolean(resolvedEntry.reframe.triggered),
+              detectedDistortion: resolvedEntry.reframe.detectedDistortion || null,
+              acknowledgment: resolvedEntry.reframe.acknowledgment || null,
+              reframeQuestion: resolvedEntry.reframe.reframeQuestion || null,
+              createdAt: resolvedEntry.reframe.createdAt || new Date().toISOString(),
+            }
+          : null,
         userId: user.uid,
         updatedAt: new Date().toISOString(),
       });
@@ -198,8 +260,13 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
     setErrorMessage(null);
 
     try {
-      // Route brainstorm mode to /api/gemini/brainstorm and other reflection modes to /api/gemini/reflect
-      const endpoint = currentMode === 'brainstorm' ? '/api/gemini/brainstorm' : '/api/gemini/reflect';
+      // Route brainstorm and action_plan to their dedicated endpoints, and other reflection modes to /api/gemini/reflect
+      const endpoint =
+        currentMode === 'brainstorm'
+          ? '/api/gemini/brainstorm'
+          : currentMode === 'action_plan'
+          ? '/api/gemini/action_plan'
+          : '/api/gemini/reflect';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -342,7 +409,12 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
       try {
         const history = currentEntry.messages.slice(0, -1);
         const modeToUse = lastMsg.mode || selectedMode;
-        const endpoint = modeToUse === 'brainstorm' ? '/api/gemini/brainstorm' : '/api/gemini/reflect';
+        const endpoint =
+          modeToUse === 'brainstorm'
+            ? '/api/gemini/brainstorm'
+            : modeToUse === 'action_plan'
+            ? '/api/gemini/action_plan'
+            : '/api/gemini/reflect';
 
         const response = await fetch(endpoint, {
           method: 'POST',
@@ -421,6 +493,29 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
     }
   };
 
+  const handleManualSave = async () => {
+    if (isSavingFirestore) return;
+    if (inputText.trim()) {
+      const userMessage: ChatMessage = {
+        id: 'msg-' + Date.now() + '-user',
+        role: 'user',
+        content: inputText.trim(),
+        timestamp: new Date().toISOString(),
+        mode: selectedMode,
+      };
+      const updated: JournalEntry = {
+        ...currentEntry,
+        messages: [...currentEntry.messages, userMessage],
+        updatedAt: new Date().toISOString(),
+      };
+      setInputText('');
+      onUpdateEntry(updated);
+      await saveToFirestore(updated);
+    } else {
+      await saveToFirestore(currentEntry);
+    }
+  };
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col min-h-[calc(100vh-4rem)]">
       {/* Top Header / Metadata Bar */}
@@ -462,7 +557,7 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
             {/* Manual Save Button */}
             <button
               id="manual-save-firestore-btn"
-              onClick={() => saveToFirestore(currentEntry)}
+              onClick={handleManualSave}
               disabled={isSavingFirestore}
               className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                 saveStatus === 'saved'
@@ -727,6 +822,59 @@ export const JournalEditor: React.FC<JournalEditorProps> = ({
             <div ref={messagesEndRef} />
           </div>
         )}
+
+        {/* Cognitive Reframe Card (Per Directive #8: only renders when triggered = true) */}
+        {currentEntry.reframe &&
+          currentEntry.reframe.triggered &&
+          currentEntry.reframe.acknowledgment &&
+          currentEntry.reframe.reframeQuestion &&
+          !dismissedReframe && (
+            <div
+              id="cognitive-reframe-card"
+              className="mt-6 p-5 sm:p-6 rounded-2xl bg-[#FAF7F2] border border-[#E8E2D6] shadow-xs animate-in fade-in slide-in-from-bottom-2 duration-200"
+            >
+              <div className="flex items-start justify-between gap-3 mb-3.5">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-[#EFF3EE] border border-[#C8D6C9] flex items-center justify-center text-[#5F6F52] shrink-0">
+                    <HeartHandshake className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-[#2E2A25]">
+                      Perspective & Reflection
+                    </h4>
+                    <p className="text-[11px] text-[#7A7268]">
+                      A gentle space to explore alternative viewpoints
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  id="dismiss-reframe-btn"
+                  onClick={() => setDismissedReframe(true)}
+                  className="p-1.5 text-[#8C8276] hover:text-[#2E2A25] hover:bg-[#EDE7DC] rounded-lg transition-colors cursor-pointer"
+                  title="Dismiss reflection"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Step 1: ACKNOWLEDGE first */}
+              <div className="text-sm text-[#3E3832] leading-relaxed mb-4">
+                {currentEntry.reframe.acknowledgment}
+              </div>
+
+              {/* Step 2: ASK, don't tell */}
+              <div className="p-4 rounded-xl bg-white/90 border border-[#E2DBD0]">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-[#5F6F52] uppercase tracking-wider mb-1.5">
+                  <Compass className="w-3.5 h-3.5" />
+                  <span>A Question to Explore</span>
+                </div>
+                <p className="text-sm font-medium text-[#2E2925] italic leading-relaxed">
+                  "{currentEntry.reframe.reframeQuestion}"
+                </p>
+              </div>
+            </div>
+          )}
       </div>
 
       {/* Sticky Bottom Input Area */}

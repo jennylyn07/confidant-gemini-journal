@@ -8,6 +8,14 @@ export interface ChatMessage {
   mode?: ReflectionMode;
 }
 
+export interface CognitiveReframe {
+  triggered: boolean;
+  detectedDistortion: string | null;
+  acknowledgment: string | null;
+  reframeQuestion: string | null;
+  createdAt?: string;
+}
+
 export interface JournalEntry {
   id: string;
   userId: string;
@@ -18,6 +26,7 @@ export interface JournalEntry {
   createdAt: string;
   updatedAt: string;
   messages: ChatMessage[];
+  reframe?: CognitiveReframe | null;
 }
 
 export interface UserProfile {

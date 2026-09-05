@@ -12,7 +12,8 @@ import {
   RefreshCw,
   AlertCircle,
   CheckCircle2,
-  X
+  X,
+  Compass
 } from 'lucide-react';
 import { JournalEntry, UserProfile } from '../types';
 import { collection, getDocs, query, orderBy, doc, deleteDoc } from 'firebase/firestore';
@@ -307,6 +308,15 @@ export const JournalHistory: React.FC<JournalHistoryProps> = ({
               {/* Footer: Tags & Turns Count */}
               <div className="pt-3 border-t border-[#E8E2D6] flex items-center justify-between text-xs text-[#7A7268]">
                 <div className="flex items-center gap-1.5 flex-wrap">
+                  {entry.reframe && entry.reframe.triggered && (
+                    <span
+                      title="Includes cognitive reframe reflection"
+                      className="px-2 py-0.5 rounded bg-[#EFF3EE] text-[10px] font-semibold text-[#3C5843] border border-[#C8D6C9] flex items-center gap-1"
+                    >
+                      <Compass className="w-2.5 h-2.5 text-[#5F6F52]" />
+                      Perspective
+                    </span>
+                  )}
                   {entry.tags && entry.tags.slice(0, 3).map((tag, idx) => (
                     <span
                       key={idx}
